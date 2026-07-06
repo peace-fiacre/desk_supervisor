@@ -1,0 +1,23 @@
+# ROS 2 Build & Execution Artifacts
+build/
+install/
+log/
+
+# Python Caches & Packaging
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+
+# AI / Vision Models (Heavy Files)
+*.pt
+*.onnx
+*.weights
+
+# IDEs Configuration (VS Code)
+.vscode/
+
+# System Files
+.DS_Store
