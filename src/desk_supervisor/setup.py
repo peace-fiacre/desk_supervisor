@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'perception_node = desk_supervisor.perception_node:main',
             'decision_node = desk_supervisor.decision_node:main',
+            'actuator_node = desk_supervisor.actuator_node:main',
         ],
     },
 )
