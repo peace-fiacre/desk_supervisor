@@ -94,7 +94,7 @@ stateDiagram-v2
 ```bash
 # Clone into your ROS2 workspace
 cd ~/Projects/Desk_supervisor/src
-git clone <repo-url> desk_supervisor
+git clone https://github.com/peace-fiacre/desk_supervisor 
 
 # Install Python dependencies (CPU-only PyTorch to avoid pulling CUDA packages)
 pip install ultralytics opencv-python \
@@ -139,7 +139,7 @@ Key tunable parameters currently live as constants in `decision_node.py` and `pe
 
 | Parameter | File | Default | Description |
 |---|---|---|---|
-| `conf` (YOLO confidence threshold) | `perception_node.py` | `0.40` | Minimum detection confidence accepted |
+| `conf` (YOLO confidence threshold) | `perception_node.py` | `0.70` | Minimum detection confidence accepted |
 | `SEUIL_NOTIF_TELEPHONE` | `decision_node.py` | `3.0s` | Time holding phone before a focus notification |
 | `SEUIL_ABSENCE_VEILLE` | `decision_node.py` | `5.0s` | Time absent before the screen locks |
 | `TAILLE_FENETRE` | `decision_node.py` | `10` | Sliding window size (number of recent detections) |
@@ -155,20 +155,31 @@ These values were chosen as a starting point and are expected to be tuned based 
 - **Detection reliability depends on lighting and camera angle**: false negatives can occur in poor lighting, which is why the sliding-window smoothing was introduced.
 - **ROS2 on a single machine**: this project uses ROS2's distributed-node philosophy for architectural clarity and reusability (the perception/decision/actuation split could be reused on an actual robot), even though it currently runs on a single machine, where the distribution benefit isn't the main driver.
 
+
 ## Project Structure
 
 ```
 Desk_supervisor/
+├── build/                          # colcon build artifacts (not versioned)
+├── install/                        # colcon install artifacts (not versioned)
+├── log/                            # colcon logs (not versioned)
 ├── src/
 │   └── desk_supervisor/
 │       ├── desk_supervisor/
-│       │   ├── perception_node.py
+│       │   ├── __init__.py
+│       │   ├── actuator_node.py
 │       │   ├── decision_node.py
-│       │   └── actuator_node.py
+│       │   └── perception_node.py
 │       ├── launch/
 │       │   └── desk_supervisor_launch.py
+│       ├── resource/
+│       ├── test/
 │       ├── package.xml
-│       └── setup.py
+│       ├── setup.cfg
+│       ├── setup.py
+│       ├── test_yolo.py            # standalone YOLO test script (Phase 1)
+│       ├── yolov8n.pt              # downloaded YOLO weights (not versioned)
+│       └── .gitignore
 └── README.md
 ```
 
