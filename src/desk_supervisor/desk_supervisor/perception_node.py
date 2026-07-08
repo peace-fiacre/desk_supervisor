@@ -1,147 +1,116 @@
-# decision_node.py
-# Nœud ROS2 : Machine à États (FSM) - reçoit les détections, décide des actions
+# perception_node.py
+# Nœud ROS2 : capture webcam + détection YOLO + publication des résultats
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from collections import deque
+import cv2
+from ultralytics import YOLO
 import json
-import time
 
-# Seuils de temporisation (en secondes)
-SEUIL_NOTIF_TELEPHONE = 3.0   # Mode Focus
-SEUIL_ABSENCE_VEILLE = 5.0    # Mode Éco (durée d'absence confirmée avant veille)
-
-# Paramètres du lissage par fenêtre glissante
-TAILLE_FENETRE = 10        # nombre de messages récents pris en compte (~1s à 10Hz)
-SEUIL_RATIO = 0.30         # en dessous de 30% de détections positives -> considéré absent/pas de téléphone
+# Classes COCO qui nous intéressent (identique à la Phase 1)
+CLASSES_INTERESSANTES = {0: "person", 67: "cell phone"}
 
 
-class DecisionNode(Node):
+class PerceptionNode(Node):
     def __init__(self):
-        super().__init__('decision_node')
+        # Initialise le nœud avec le nom "perception_node"
+        super().__init__('perception_node')
 
-        self.subscription = self.create_subscription(
+        # Charge le modèle YOLO (déjà téléchargé en Phase 1, donc pas de re-téléchargement)
+        self.model = YOLO("yolov8n.pt")
+
+        # Ouvre la webcam
+        self.cap = cv2.VideoCapture(0)
+        if not self.cap.isOpened():
+            self.get_logger().error("Impossible d'ouvrir la webcam")
+            raise RuntimeError("Webcam inaccessible")
+
+        # Crée le publisher sur le topic /perception/detections
+        self.publisher_ = self.create_publisher(String, '/perception/detections', 10)
+
+        # Abonnement à l'état de la FSM (pour affichage)
+        self.current_state = "FOCUS"  # valeur par défaut avant le premier message reçu
+        self.state_subscription = self.create_subscription(
             String,
-            '/perception/detections',
-            self.detection_callback,
+            '/decision/state',
+            self.state_callback,
             10
         )
 
-        self.command_publisher = self.create_publisher(String, '/system/commands', 10)
-        self.state_publisher = self.create_publisher(String, '/decision/state', 10)
+        # Timer qui appelle self.timer_callback toutes les 0.1s (~10 Hz)
+        self.timer = self.create_timer(0.1, self.timer_callback)
+        self.get_logger().info("Perception node démarré")
 
-        # État courant de la FSM
-        self.state = "FOCUS"
+    def state_callback(self, msg):
+        self.current_state = msg.data
 
-        # Fenêtres glissantes : historique des dernières détections (True/False)
-        self.person_history = deque(maxlen=TAILLE_FENETRE)
-        self.phone_history = deque(maxlen=TAILLE_FENETRE)
-
-        # Timestamp du début de l'absence courante (utilisé pour le délai de 5s avant veille)
-        self.absence_start_time = None
-
-        # Timestamp du début du téléphone en main courant (utilisé pour le délai de 3s)
-        self.phone_start_time = None
-
-        # Flags pour ne déclencher chaque action qu'une seule fois par épisode
-        self.notif_envoyee = False
-        self.veille_envoyee = False
-
-        self.get_logger().info("Decision node démarré, état initial : FOCUS")
-
-    def detection_callback(self, msg):
-        try:
-            data = json.loads(msg.data)
-        except json.JSONDecodeError:
-            self.get_logger().warn("JSON invalide reçu, message ignoré")
+    def timer_callback(self):
+        ret, frame = self.cap.read()
+        if not ret:
+            self.get_logger().warn("Frame non lue")
             return
 
-        now = time.time()
-        person_detected = data.get("person_detected", False)
-        phone_detected = data.get("phone_detected", False)
+        # Inférence YOLO sur la frame actuelle (seuil de confiance à 0.40)
+        results = self.model(frame, conf=0.70, verbose=False)[0]
 
-        # Ajoute la détection courante à l'historique glissant
-        self.person_history.append(person_detected)
-        self.phone_history.append(phone_detected)
+        # Valeurs par défaut : rien détecté
+        person_detected = False
+        phone_detected = False
+        person_confidence = 0.0
+        phone_confidence = 0.0
 
-        # Calcule les ratios sur la fenêtre actuelle
-        # Note : tant que la fenêtre n'est pas pleine (au démarrage), le ratio
-        # est calculé sur moins de 10 échantillons - donc moins fiable les
-        # premières secondes après le lancement du nœud.
-        ratio_person = sum(self.person_history) / len(self.person_history)
-        ratio_phone = sum(self.phone_history) / len(self.phone_history)
+        for box in results.boxes:
+            class_id = int(box.cls[0])
 
-        person_present_smoothed = ratio_person >= SEUIL_RATIO
-        phone_present_smoothed = ratio_phone >= SEUIL_RATIO
+            # Filtre : ignore tout ce qui n'est pas person/cell phone
+            if class_id not in CLASSES_INTERESSANTES:
+                continue
 
-        # --- Logique de la FSM ---
+            confiance = float(box.conf[0])
 
-        if self.state == "FOCUS":
-            if not person_present_smoothed:
-                # Début d'un épisode d'absence
-                self.state = "ABSENT_PENDING"
-                self.absence_start_time = now
-                self.get_logger().info(
-                    f"Transition FOCUS -> ABSENT_PENDING (ratio_person={ratio_person:.2f})"
-                )
-                self.publish_state()
-                return
+            if class_id == 0:  # person
+                person_detected = True
+                person_confidence = max(person_confidence, confiance)
+            elif class_id == 67:  # cell phone
+                phone_detected = True
+                phone_confidence = max(phone_confidence, confiance)
 
-            # Gestion du téléphone (avec lissage)
-            if phone_present_smoothed:
-                if self.phone_start_time is None:
-                    self.phone_start_time = now
-                duree_telephone = now - self.phone_start_time
-                if duree_telephone >= SEUIL_NOTIF_TELEPHONE and not self.notif_envoyee:
-                    self.publish_command("NOTIFY")
-                    self.notif_envoyee = True
-                    self.get_logger().info("Notification envoyée (téléphone détecté)")
-            else:
-                self.phone_start_time = None
-                self.notif_envoyee = False
+            # Dessine le rectangle et le label sur l'image
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            label = CLASSES_INTERESSANTES[class_id]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, f"{label} {confiance:.2f}", (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        elif self.state == "ABSENT_PENDING":
-            if person_present_smoothed:
-                self.state = "FOCUS"
-                self.absence_start_time = None
-                self.get_logger().info(
-                    f"Transition ABSENT_PENDING -> FOCUS (ratio_person={ratio_person:.2f})"
-                )
-                self.publish_state()
-                return
+        # Construit le message JSON
+        data = {
+            "person_detected": person_detected,
+            "phone_detected": phone_detected,
+            "person_confidence": round(person_confidence, 2),
+            "phone_confidence": round(phone_confidence, 2),
+            "timestamp": self.get_clock().now().to_msg().sec
+        }
 
-            duree_absence = now - self.absence_start_time
-            if duree_absence >= SEUIL_ABSENCE_VEILLE and not self.veille_envoyee:
-                self.publish_command("SCREEN_OFF")
-                self.veille_envoyee = True
-                self.state = "SLEEP"
-                self.get_logger().info("Transition ABSENT_PENDING -> SLEEP")
+        # Affichage vidéo avec état FSM
+        cv2.putText(frame, f"Etat: {self.current_state}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+        cv2.imshow("Desk Supervisor - Debug", frame)
+        cv2.waitKey(1)
 
-        elif self.state == "SLEEP":
-            if person_present_smoothed:
-                self.publish_command("SCREEN_ON")
-                self.veille_envoyee = False
-                self.absence_start_time = None
-                self.state = "FOCUS"
-                self.get_logger().info("Transition SLEEP -> FOCUS (réveil)")
-
-        self.publish_state()
-
-    def publish_command(self, command):
         msg = String()
-        msg.data = command
-        self.command_publisher.publish(msg)
+        msg.data = json.dumps(data)
+        self.publisher_.publish(msg)
 
-    def publish_state(self):
-        msg = String()
-        msg.data = self.state
-        self.state_publisher.publish(msg)
+    def destroy_node(self):
+        # Libère la webcam proprement quand le nœud s'arrête
+        self.cap.release()
+        super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = DecisionNode()
+    node = PerceptionNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
@@ -153,5 +122,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-    
-    
